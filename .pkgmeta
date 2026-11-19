@@ -1,0 +1,5 @@
+package-as: CrateExpectationsCases
+
+ignore:
+  - README.md
+  - .github
