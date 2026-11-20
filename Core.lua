@@ -23,6 +23,8 @@ local DEFAULTS = {
     hunt = {},          -- [itemID] = true: items the player is hunting (the red Heirloom tier)
     seenOnce = {},      -- [containerID] = true: a show-once box that has had its one show
     batch = true,       -- stay open after collecting and offer the next box of the same kind
+    autoCollect = true, -- take the loot by itself a moment after the last card, no COLLECT click
+    oddsAlways = false, -- keep the "What's inside" panel up while the cards/reel play (it steps aside by default)
 }
 
 -- Boxes that only ever give one thing get their show once, then open normally forever after.
@@ -106,7 +108,7 @@ end
 function ns.CardCount(id)
     local c = ns.Containers[id]
     if c and c.single then return 1 end -- Comprehension: always exactly one result
-    local n = SLOTS[id] or DEFAULT_SLOTS
+    local n = SLOTS[id] or (c and c.slots) or DEFAULT_SLOTS -- (world chests carry their own count)
     if n == 1 then return 1 end -- reel boxes stay reels (an extra item is another spin, not a card)
     local seen = ns.db and ns.db.maxSeen[id]
     if seen and seen > n then n = seen end
@@ -152,6 +154,8 @@ end
 local QUESTION = "Interface\\Icons\\INV_Misc_QuestionMark"
 
 function ns.ItemIcon(id)
+    local c = ns.Containers and ns.Containers[id]
+    if c and c.icon then return c.icon end -- world chests aren't items: they bring their own icon
     local icon
     if C_Item and C_Item.GetItemIconByID then icon = C_Item.GetItemIconByID(id) end
     if not icon and GetItemIcon then icon = GetItemIcon(id) end
@@ -396,10 +400,25 @@ BuildTiersRaw = function(cid)
 end
 
 -- tier 1-5 for an item from a container; items not in the table fall back to their quality
+local chestTierCache = {}
+
+-- world chests carry their own tier per item (row[7]: AH price ranked within that chest, Chests.lua)
+local function ChestTier(containerID, itemID)
+    local c = ns.Containers[containerID]
+    if not (c and c.world and itemID) then return nil end
+    local map = chestTierCache[containerID]
+    if not map then
+        map = {}
+        for _, r in ipairs(c.items) do map[r[1]] = r[7] end
+        chestTierCache[containerID] = map
+    end
+    return map[itemID]
+end
+
 function ns.TierOf(containerID, itemID, quality)
     if ns.IsHunted(itemID) then return ns.HEIRLOOM end -- the player's own hunt beats every rule
-    -- the reviewed list (Tiers.lua) decides; the old rules are only a fallback for anything not on it
-    local t = itemID and ns.ItemTiers and ns.ItemTiers[itemID]
+    -- a world chest's own scale first; then the reviewed list (Tiers.lua); the old rules are only a fallback
+    local t = ChestTier(containerID, itemID) or (itemID and ns.ItemTiers and ns.ItemTiers[itemID])
     if not t then
         local map = tierCache[containerID] or BuildTiers(containerID)
         t = (itemID and map[itemID]) or QualityTier(quality)
@@ -420,7 +439,7 @@ function ns.SortedContainerIDs()
 end
 
 -- Box groups for the demo picker and the < > buttons
-ns.CATEGORIES = { "Lockboxes", "Junkboxes", "Chests", "Crates", "Clams", "Fishing trunks", "Mage scrolls", "Other" }
+ns.CATEGORIES = { "Lockboxes", "Junkboxes", "Chests", "World chests", "Crates", "Clams", "Fishing trunks", "Mage scrolls", "Other" }
 
 function ns.CategoryOf(id)
     local c = ns.Containers[id]
@@ -625,18 +644,54 @@ local function LootIsFromItem()
     return type(guid) ~= "string" or guid:find("^Item%-") ~= nil
 end
 
+-- the world chest this loot window belongs to (its game object's entry ID is in the GUID), or nil
+local function LootChest()
+    if not GetLootSourceInfo or not ns.ChestObjects then return nil end
+    local ok, guid = pcall(GetLootSourceInfo, 1)
+    if not ok or type(guid) ~= "string" or (issecretvalue and issecretvalue(guid)) then return nil end
+    local kind, _, _, _, _, entry = strsplit("-", guid)
+    if kind ~= "GameObject" then return nil end
+    return ns.ChestObjects[tonumber(entry)]
+end
+
+-- In a group, loot at or above the threshold isn't simply ours to take: it goes to a Need/Greed roll, or to
+-- the master looter. Returns "roll" / "master" and the threshold, or nil when everything is ours to take.
+local function GroupLootRule()
+    if not (IsInGroup and IsInGroup()) then return nil end
+    local method, mlParty, mlRaid
+    if C_PartyInfo and C_PartyInfo.GetLootMethod then
+        local ok, m, p, r = pcall(C_PartyInfo.GetLootMethod)
+        if ok then method, mlParty, mlRaid = m, p, r end
+    end
+    if method == nil and GetLootMethod then method, mlParty, mlRaid = GetLootMethod() end
+    local threshold = (GetLootThreshold and GetLootThreshold()) or 2
+    local E = Enum and Enum.LootMethod or {}
+    if method == "master" or method == 2 or (E.Masterlooter and method == E.Masterlooter) then
+        local me = (mlParty == 0) or (mlRaid and UnitIsUnit and UnitIsUnit("raid" .. mlRaid, "player")) or false
+        return "master", threshold, me
+    end
+    if method == "group" or method == "needbeforegreed" or method == 3 or method == 4
+        or (E.Group and method == E.Group) or (E.Needbeforegreed and method == E.Needbeforegreed) then
+        return "roll", threshold
+    end
+    return nil
+end
+
+-- slot.shared: "roll" (Need/Greed), "master" (the master looter hands it out) or "locked" (not ours, e.g. not
+-- our turn): the show reveals it, but never takes it. The game's own roll windows / loot window handle it.
 local function ReadLootSlots()
     local slots = {}
     local n = GetNumLootItems() or 0
     local moneyType = Enum and Enum.LootSlotType and Enum.LootSlotType.Money
+    local rule, threshold, iAmML = GroupLootRule()
     for i = 1, n do
-        local icon, name, qty, _, quality = GetLootSlotInfo(i)
+        local icon, name, qty, _, quality, locked = GetLootSlotInfo(i)
         local slotType = GetLootSlotType and GetLootSlotType(i)
         if icon or name then
             local link = GetLootSlotLink(i)
             local id = link and tonumber(link:match("item:(%d+)"))
             if type(name) == "string" then name = name:gsub("\n", " ") end
-            slots[#slots + 1] = {
+            local s = {
                 slot = i,
                 itemID = id,
                 icon = icon,
@@ -645,67 +700,240 @@ local function ReadLootSlots()
                 quality = quality or 1,
                 money = (moneyType and slotType == moneyType) or (not link and not id),
             }
-            if slots[#slots].money then slots[#slots].copper = ns.ParseMoney(name) end
+            if s.money then
+                s.copper = ns.ParseMoney(name)
+            elseif rule and (quality or 1) >= threshold then
+                s.shared = rule
+                if rule == "master" and iAmML then s.mine = true end -- ours to hand out
+            elseif locked then
+                s.shared = "locked"
+            end
+            slots[#slots + 1] = s
         end
     end
     return slots
 end
 
+-- shared items still waiting on a roll / the master looter: { [itemID] = slot }, to catch who got them
+local sharedWatch, sharedUntil = {}, 0
+
+local function WatchShared(cid, slots)
+    for _, s in ipairs(slots) do
+        if s.shared and s.itemID then
+            s.cid = cid
+            sharedWatch[s.itemID] = s
+        end
+    end
+    if next(sharedWatch) then sharedUntil = GetTime() + 180 end
+end
+
+-- a game format string ("%s won: %s") as a Lua pattern with captures
+local function FmtPattern(fmt)
+    if type(fmt) ~= "string" then return nil end
+    fmt = fmt:gsub("%%%d%$", "%%") -- "%1$s" -> "%s"
+    fmt = fmt:gsub("([%(%)%.%+%-%*%?%[%]%^%$])", "%%%1")
+    return "^" .. fmt:gsub("%%s", "(.+)"):gsub("%%d", "(%%d+)") .. "$"
+end
+
+local rollPatterns
+local function RollPatterns()
+    if rollPatterns then return rollPatterns end
+    rollPatterns = {}
+    local function add(fmt, kind)
+        local p = FmtPattern(fmt)
+        if p then rollPatterns[#rollPatterns + 1] = { p, kind } end
+    end
+    add(LOOT_ROLL_YOU_WON, "you")         -- You won: %s
+    add(LOOT_ROLL_ALL_PASSED, "passed")   -- Everyone passed on: %s
+    add(LOOT_ROLL_WON, "other")           -- %s won: %s
+    add(LOOT_ITEM_SELF, "you")            -- You receive loot: %s. (the master looter gave it to us)
+    add(LOOT_ITEM_SELF_MULTIPLE, "you")
+    add(LOOT_ITEM, "other")               -- %s receives loot: %s.
+    add(LOOT_ITEM_MULTIPLE, "other")
+    return rollPatterns
+end
+
+-- who ended up with a shared item: tell the card, and count it if it's ours
+local function OnSharedLootMessage(msg)
+    if not next(sharedWatch) or type(msg) ~= "string" or (issecretvalue and issecretvalue(msg)) then return end
+    if GetTime() > sharedUntil then wipe(sharedWatch) return end
+    local id = tonumber(msg:match("item:(%d+)"))
+    local s = id and sharedWatch[id]
+    if not s then return end
+    for _, p in ipairs(RollPatterns()) do
+        local a, b = msg:match(p[1])
+        if a then
+            local who
+            if p[2] == "other" then who = a:match("^|c%x%x%x%x%x%x%x%x(.-)|r$") or a:gsub("|H.-|h", ""):gsub("|h", "") end
+            -- (our own Collect also says "You receive loot", but shared items are never in it)
+            sharedWatch[id] = nil
+            s.result, s.winner = p[2], who
+            if p[2] == "you" then ns.RecordItem(s.cid, s) end
+            ns.UI:SharedResult(s)
+            return
+        end
+    end
+end
+
+local chestCast -- { id, guid, at, casting, succeeded } while a world chest's opening cast is under way
+
+local function ChestAllowed(id)
+    return ns.db and ns.db.enabled and not ns.live and not InCombat() and ns.IsBoxEnabled(id)
+end
+
+-- the opening cast finished (or the game opened the chest straight away): the real loot replaces the deck
 local function OnLootShown(autoLoot)
     if ns.live then
         ns.HideLootFrame() -- LOOT_OPENED after LOOT_READY: keep it hidden
         return
     end
-    if not pending or GetTime() - pending.at > 5 then return end
-    if not LootIsFromItem() then return end
+    local id, manual, fromCast
+    local chestID = LootChest()
+    if chestID then
+        local cc = chestCast
+        chestCast = nil
+        if pending and pending.chest then pending = nil end
+        if (cc and cc.dismissed) or ns.skipLoot then -- (auto loot comes back when the loot window closes)
+            ns.skipLoot = true -- (LOOT_OPENED follows LOOT_READY: stay out of this window until it closes)
+            return
+        end
+        if not ChestAllowed(chestID) then
+            if cc then ns.UI:CancelChest() end
+            return
+        end
+        -- (missed the cast, e.g. a renamed chest: the modifier still means "just loot it")
+        if not cc and IsModifiedClick and IsModifiedClick("AUTOLOOTTOGGLE") then return end
+        -- (a chest that opened without a cast gets the normal build-up instead)
+        id, fromCast = chestID, cc ~= nil and cc.casting == true and cc.id == chestID
+    else
+        if not pending or pending.chest or GetTime() - pending.at > 5 then return end
+        if not LootIsFromItem() then return end
+        id, manual = pending.itemID, pending.fromUI
+    end
     local slots = ReadLootSlots()
-    if #slots == 0 then return end
+    if #slots == 0 then
+        if fromCast then ns.UI:CancelChest("Empty! Someone got here first.") end
+        if not chestID then
+            -- an empty box (a clam with no meat, ~4%): nothing to take, but it still gets its show. It counts
+            -- as an opening; a show-once box keeps its one real show for when something does come out.
+            pending = nil
+            ns.RecordOpen(id, slots)
+            if CloseLoot then CloseLoot() end -- (the empty window closing gives auto loot back)
+            C_Timer.After(0, function()
+                if not ns.live and not InCombat() then ns.UI:Open(id, slots, true, true, manual) end
+            end)
+        end
+        return
+    end
+    pending = nil
+
+    local c = ns.Containers[id]
+    local numItems, shared = 0, false
+    for _, s in ipairs(slots) do
+        if not s.money then
+            numItems = numItems + 1
+            -- world chests drop random world loot that no list ever has in full: no Elusive for them
+            if s.itemID and not c.world and not ns.InPool(id, s.itemID) then s.elusive = true end
+            if s.shared then shared = true end
+        end
+    end
+    -- more items than cards: remember it, so this box deals that many from now on
+    if numItems > (ns.db.maxSeen[id] or 0) and numItems > ns.CardCount(id) then ns.db.maxSeen[id] = numItems end
+    if ns.ONCE_ONLY[id] then ns.db.seenOnce[id] = true end
+    if shared then WatchShared(id, slots) end
 
     -- The game already decided to auto-loot this one (the auto-loot setting was read before we could pause
     -- it, so SpeedyAutoLoot & co. are taking everything now). This handler runs before theirs, so the loot
     -- is still readable: play the case anyway, as "already in your bags" (like Comprehension), no Collect.
-    local manual = pending.fromUI
     if autoLoot == true then
-        local id = pending.itemID
-        pending = nil
-        ns.Debug("auto loot is taking this box: playing it as already looted")
-        local numItems = 0
-        for _, s in ipairs(slots) do
-            if not s.money then
-                numItems = numItems + 1
-                if s.itemID and not ns.InPool(id, s.itemID) then s.elusive = true end
-            end
-        end
-        -- more items than cards: remember it, so this box deals that many from now on
-        if numItems > (ns.db.maxSeen[id] or 0) and numItems > ns.CardCount(id) then ns.db.maxSeen[id] = numItems end
-        if ns.ONCE_ONLY[id] then ns.db.seenOnce[id] = true end
+        ns.Debug("auto loot is taking this one: playing it as already looted")
         ns.RecordOpen(id, slots)
         C_Timer.After(0, function()
-            if not ns.live and not InCombat() then ns.UI:Open(id, slots, true, true, manual) end
+            if not ns.live and not InCombat() then ns.UI:Open(id, slots, true, true, manual, fromCast) end
         end)
         return
     end
 
-    local id = pending.itemID
-    pending = nil
-    local numItems = 0
-    for _, s in ipairs(slots) do
-        if not s.money then
-            numItems = numItems + 1
-            if s.itemID and not ns.InPool(id, s.itemID) then s.elusive = true end
-        end
-    end
-    if numItems > (ns.db.maxSeen[id] or 0) and numItems > ns.CardCount(id) then
-        ns.db.maxSeen[id] = numItems
-    end
-    if ns.ONCE_ONLY[id] then ns.db.seenOnce[id] = true end
     -- room check up front: the UI warns before Collect (stacking onto existing stacks can still save a slot)
     local free = ns.FreeBagSlots()
+    local toTake = 0
+    for _, s in ipairs(slots) do if not s.money and not s.shared then toTake = toTake + 1 end end
     ns.live = { itemID = id, slots = slots, collecting = false, free = free,
-        short = math.max(0, numItems - free) }
+        short = math.max(0, toTake - free), shared = shared }
     ns.HideLootFrame()
     C_Timer.After(0, function() if ns.live then ns.HideLootFrame() end end)
-    ns.UI:Open(id, slots, true, nil, manual)
+    ns.UI:Open(id, slots, true, nil, manual, fromCast)
+end
+
+---------------------------------------------------------------------------
+-- World chests: clicking one starts an "Opening" cast. UNIT_SPELLCAST_SENT names the chest, so auto loot is
+-- paused before any loot window; the cast plays the build-up, and the loot window (its GUID says which chest)
+-- brings the cards.
+---------------------------------------------------------------------------
+
+-- the player closed the screen mid-cast: this chest opens the normal way
+function ns.ChestScreenClosed()
+    if chestCast then chestCast.dismissed = true end
+end
+
+local function EndChestCast(msg)
+    chestCast = nil
+    if pending and pending.chest then pending = nil end
+    ns.RestoreAutoLoot()
+    ns.UI:CancelChest(msg)
+end
+
+local PICK_LOCK = 1804
+
+local function OnChestSent(target, castGUID, spellID)
+    if type(target) ~= "string" or (issecretvalue and issecretvalue(target)) then return end
+    -- picking a locked chest isn't opening it (the Opening cast comes after)
+    if spellID == PICK_LOCK then return end
+    local sn = spellID and not (issecretvalue and issecretvalue(spellID)) and C_Spell and C_Spell.GetSpellName
+        and C_Spell.GetSpellName(spellID)
+    if type(sn) == "string" and sn:lower():find("pick lock", 1, true) then return end
+    local id = ns.ChestNames and ns.ChestNames[target]
+    if not id or not ChestAllowed(id) then return end
+    if IsModifiedClick and IsModifiedClick("AUTOLOOTTOGGLE") then return end -- "just loot it"
+    local at = GetTime()
+    chestCast = { id = id, guid = castGUID, at = at }
+    pending = { itemID = id, at = at, chest = true }
+    ns.SuspendAutoLoot()
+    ns.Debug("chest:", target, id)
+    -- no cast and no loot (out of range, already being looted...): give everything back
+    C_Timer.After(2, function()
+        local cc = chestCast
+        if cc and cc.at == at and not cc.casting and not cc.succeeded then EndChestCast() end
+    end)
+end
+
+local function OnChestCastStart(castGUID)
+    local cc = chestCast
+    if not cc or (cc.guid and castGUID and cc.guid ~= castGUID) then return end
+    cc.casting = true
+    local startT, endT
+    if UnitCastingInfo then
+        local ok, _, _, _, s, e = pcall(UnitCastingInfo, "player")
+        if ok and s and e then startT, endT = s / 1000, e / 1000 end
+    end
+    ns.UI:OpenChestPending(cc.id, startT, endT)
+end
+
+local function OnChestCastStopped(castGUID)
+    local cc = chestCast
+    if not cc or cc.succeeded or (cc.guid and castGUID and cc.guid ~= castGUID) then return end
+    ns.Debug("chest cast stopped")
+    EndChestCast("Opening interrupted.")
+end
+
+local function OnChestCastSucceeded(castGUID)
+    local cc = chestCast
+    if not cc or (cc.guid and castGUID and cc.guid ~= castGUID) then return end
+    cc.succeeded = true
+    -- the loot window follows right away; if it doesn't, the chest was empty or someone beat us to it
+    C_Timer.After(3, function()
+        if chestCast == cc then EndChestCast("Nothing came out.") end
+    end)
 end
 
 -- Called by the UI once the spins are done.
@@ -713,12 +941,41 @@ function ns.CollectLive()
     local live = ns.live
     if not live or live.collecting then return end
     live.collecting = true
+    local skip = {}
+    for _, s in ipairs(live.slots) do
+        if s.shared then skip[s.slot] = true end
+    end
     for i = GetNumLootItems(), 1, -1 do
-        LootSlot(i)
+        if not skip[i] then LootSlot(i) end
+    end
+    if live.shared then
+        -- group loot: take ours, leave the rest to the game. Rolls carry on without the loot window; the
+        -- master looter gets the window back to hand things out.
+        C_Timer.After(0.6, function()
+            if ns.live ~= live then return end
+            for i = 1, GetNumLootItems() do
+                if not skip[i] and (not LootSlotHasItem or LootSlotHasItem(i)) then
+                    ns.LootStuck(live) -- something of ours didn't fit
+                    return
+                end
+            end
+            local handOut = false
+            for _, s in ipairs(live.slots) do
+                if s.shared == "master" and s.mine then handOut = true end
+            end
+            if handOut then
+                live.handedOff = true
+                ns.RevealLootFrame()
+                ns.UI:HandOut()
+            elseif CloseLoot then
+                CloseLoot()
+            end
+        end)
+        return
     end
     -- Bags full or something refused: show the real window so nothing is stranded.
     C_Timer.After(1.5, function()
-        if ns.live == live then ns.LootStuck(live) end
+        if ns.live == live and not live.handedOff then ns.LootStuck(live) end
     end)
 end
 
@@ -786,23 +1043,27 @@ function ns.RecordOpen(itemID, slots, sheep)
     for _, s in ipairs(slots) do
         if s.money then
             stats.copper = (stats.copper or 0) + (s.copper or 0)
-        else
-            if s.itemID then stats.won[s.itemID] = (stats.won[s.itemID] or 0) + (s.count or 1) end
-            local t = ns.LandedTier(itemID, s)
-            stats.tiers[t] = (stats.tiers[t] or 0) + 1
-            stats.items = (stats.items or 0) + 1
-            if t >= 3 then
-                rare = true
-                stats.gotRare = (stats.gotRare or 0) + 1
-            end
-            if t >= 4 then stats.gotEpic = (stats.gotEpic or 0) + 1 end
-            local best = stats.best
-            if s.itemID and (not best.tier or t > best.tier) then
-                stats.best = { id = s.itemID, tier = t, name = s.name or ns.ItemName(s.itemID), box = itemID }
-            end
+        elseif not s.shared then -- (group loot that went to a roll counts only if we win it: ns.RecordWon)
+            if ns.RecordItem(itemID, s) then rare = true end
         end
     end
     stats.sinceRare = rare and 0 or (stats.sinceRare or 0) + 1
+end
+
+-- one item into the stats; true when it's Rare or better
+function ns.RecordItem(cid, s)
+    local stats = ns.db.stats
+    if s.itemID then stats.won[s.itemID] = (stats.won[s.itemID] or 0) + (s.count or 1) end
+    local t = ns.LandedTier(cid, s)
+    stats.tiers[t] = (stats.tiers[t] or 0) + 1
+    stats.items = (stats.items or 0) + 1
+    if t >= 3 then stats.gotRare = (stats.gotRare or 0) + 1 end
+    if t >= 4 then stats.gotEpic = (stats.gotEpic or 0) + 1 end
+    local best = stats.best
+    if s.itemID and (not best.tier or t > best.tier) then
+        stats.best = { id = s.itemID, tier = t, name = s.name or ns.ItemName(s.itemID), box = cid }
+    end
+    return t >= 3
 end
 
 -- a light-hearted verdict: actual Rare+ against what the boxes you opened should have given
@@ -823,6 +1084,7 @@ end
 
 local function OnLootClosed()
     pending = nil
+    ns.skipLoot = nil
     local live = ns.live
     if live then
         ns.live = nil
@@ -881,6 +1143,21 @@ function ns.RollDemo(id)
     local coins = DemoCoins(id)
     if coins > 0 then slots[#slots + 1] = { money = true, copper = coins } end
     return slots
+end
+
+-- chance a box gives nothing at all (no item, no coins), drops treated as independent
+function ns.EmptyChance(id)
+    local c = ns.Containers[id]
+    if not c or c.single or c.world or (c.money or 0) > 0 then return 0 end
+    if ns.IsReelBox(id) then
+        -- reel boxes give one thing from the list (the crates' chances add up to 100%: never empty)
+        local sum = 0
+        for _, r in ipairs(c.items) do sum = sum + r[2] end
+        return math.max(0, 1 - sum / 100)
+    end
+    local none = 1
+    for _, r in ipairs(c.items) do none = none * (1 - math.min(100, r[2]) / 100) end
+    return none
 end
 
 function ns.WeightedPick(items)
@@ -949,6 +1226,7 @@ function ns.ForceRoll(id, t, count)
     end
     if t == 0 then
         if c.failPct then return { ns.FailSlot() } end
+        if ns.EmptyChance(id) >= 0.01 then return {} end -- a box that can come up empty: an empty one
         return nil
     end
     local pool = {}
@@ -1260,12 +1538,15 @@ ev:RegisterEvent("PLAYER_REGEN_DISABLED")
 ev:SetScript("OnEvent", function(_, event, a1, a2, a3, a4)
     if event == "UNIT_SPELLCAST_SUCCEEDED" then -- unit, castGUID, spellID
         if ns.db and ns.db.debug then ns.Debug("spell", a3, SpellName(a3)) end
+        OnChestCastSucceeded(a2)
         OnSpellSucceeded(a2, a3)
         return
     elseif event == "UNIT_SPELLCAST_SENT" then -- unit, target, castGUID, spellID
         if IsComprehension(a4) and type(a2) == "string" and not (issecretvalue and issecretvalue(a2)) then
             sentName = { name = a2, at = GetTime() }
             ns.Debug("comprehend sent, target:", a2)
+        else
+            OnChestSent(a2, a3, a4)
         end
         return
     elseif event == "PLAYER_REGEN_DISABLED" then
@@ -1277,13 +1558,16 @@ ev:SetScript("OnEvent", function(_, event, a1, a2, a3, a4)
         if comp then CheckSheep() end
         return
     elseif event == "UNIT_SPELLCAST_START" then -- unit, castGUID, spellID
+        OnChestCastStart(a2)
         OnCastStart(a2, a3)
         return
     elseif event == "UNIT_SPELLCAST_INTERRUPTED" or event == "UNIT_SPELLCAST_FAILED"
         or event == "UNIT_SPELLCAST_FAILED_QUIET" then
+        OnChestCastStopped(a2)
         OnCastStopped(a2)
         return
     elseif event == "CHAT_MSG_LOOT" then
+        OnSharedLootMessage(a1)
         OnLootMessage(a1)
         return
     end

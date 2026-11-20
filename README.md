@@ -14,7 +14,9 @@ The show is purely for fun: **your loot is exactly what the game gave you**. The
 
 - **Card pulls** for boxes with several items: every item lands as a card, and you flip them one by one.
 - **A spinning reel** for boxes that give a single item, landing on what you actually got.
+- **World chests** too: Battered, Solid, Iron Bound and friends, out in the world and in dungeons. The chest rattles while you open it, then deals what's inside. Works in groups as well.
 - **Rarity tiers** from Common to Legendary, hand-picked for every item in every supported box.
+- **Drop chances** shown under every item in the box, before and (if you like) during the show.
 - **Effects that scale with rarity.** Commons stay quiet, Rares sparkle, Epics glow, and Legendaries take centre stage with the screen dimmed around them.
 - **Coin purse** for any gold, silver and copper inside.
 
@@ -26,6 +28,14 @@ The show is purely for fun: **your loot is exactly what the game gave you**. The
 - **Elusive (teal):** an item that isn't on our loot list for that box. The addon asks you to report it so it can be added.
 
 ![An Heirloom pull: Eaglehorn Long Bow in red](https://raw.githubusercontent.com/L33T/CrateExpectations/main/.github/screenshots/04_heirloom.png)
+
+## World chests
+
+Open a chest in the world and the show starts with the opening cast: the chest shakes harder as the bar fills. When the cast finishes, the cards are dealt with what's really inside.
+
+- **In a group**, items that go to a roll or the master looter get a card too, stamped *UP FOR ROLL* or *LOOTER'S CALL*, and the card updates when someone wins it. The addon only takes what's yours.
+- **Pick Lock** doesn't trigger it, and holding your auto-loot modifier skips the show as usual.
+- A chest's rarities are ranked within that chest, so a green can be a big deal in a low-level Battered Chest.
 
 ## Mage Comprehension
 
@@ -43,6 +53,8 @@ And yes, if it turns you into a sheep, the reel knows.
 
 With **batch mode** (on by default), an **OPEN ANOTHER** button appears after each opening, so you can work through a stack of boxes or scrolls without closing the screen.
 
+![A comprehend that landed on a Rare, with COMPREHEND ANOTHER (2 left) next to Close](https://raw.githubusercontent.com/L33T/CrateExpectations/main/.github/screenshots/08_another.png)
+
 ## Your Luck
 
 `/crates stats` shows how many boxes you've opened, every tier you've pulled, your best pull ever, and a **luck meter** comparing your Rares and Epics to the average for the exact boxes you opened.
@@ -51,13 +63,25 @@ With **batch mode** (on by default), an **OPEN ANOTHER** button appears after ea
 
 `/crates` opens Settings, where you can turn the show off for individual boxes, manage your hunting list, open the **Demo room** to play any box without using one, and open your boxes from **My boxes**.
 
+Options include **Auto-collect** (on by default: the loot is taken a moment after the last card, no COLLECT click) and **Keep the odds up during the show** (off by default).
+
 ![The Settings panel: box toggles, the hunting list and options](https://raw.githubusercontent.com/L33T/CrateExpectations/main/.github/screenshots/07_settings.png)
 
 ## Install
 
-Download the latest release and unzip it into `World of Warcraft/_forever_/Interface/AddOns/`, so you end up with `AddOns/CrateExpectationsCases/CrateExpectationsCases.toc`.
+Download `CrateExpectationsCases-x.y.z.zip` from the [latest release](https://github.com/L33T/CrateExpectations/releases/latest) and unzip it into `World of Warcraft/_forever_/Interface/AddOns/`, so you end up with:
 
-Then type `/crates` in game.
+```
+AddOns/CrateExpectationsCases/CrateExpectationsCases.toc
+```
+
+Restart the game fully, then type `/crates`.
+
+**Not showing up in the AddOns list?** WoW only loads the addon when the folder is named exactly `CrateExpectationsCases` and sits directly in `AddOns`:
+
+- Don't use GitHub's green **Code → Download ZIP** button: its folder is named `CrateExpectations-main`. If you did, rename the folder to `CrateExpectationsCases`.
+- Windows' **Extract All** can add an extra folder layer (`AddOns/CrateExpectationsCases-1.1.0/CrateExpectationsCases/…`). Move the inner folder directly into `AddOns`.
+- Make sure it's the `_forever_` folder, not `_retail_` or `_classic_era_`.
 
 ## Commands
 
@@ -86,7 +110,7 @@ Found an Elusive item, or a bug? Please [open an issue](https://github.com/L33T/
 
 ## Credits
 
-Drop chances come from [Wowhead](https://www.wowhead.com/). Item rarities were hand-picked for each box, using vendor and Auction House prices as a guide.
+Drop chances come from [Wowhead](https://www.wowhead.com/). Item rarities were hand-picked for each box, using vendor and Auction House prices as a guide. World chest rarities come from Auction House prices, ranked within each chest.
 
 ## Disclaimer
 

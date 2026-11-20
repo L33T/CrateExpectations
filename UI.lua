@@ -31,10 +31,13 @@ local FLIP = 0.3
 local TILE, STEP = 92, 102
 local REEL_TILES, TARGET = 60, 52
 local REEL_H = 138
-local CELL_W, CELL_H = 74, 56
+local CELL_W, CELL_H = 74, 66 -- (tile + its drop chance underneath)
 local ODDS_H, ODDS_HEAD = 560, 44
 local SHOW_SCALE, SHOW_Y = 1.7, 30
 local GOLD_R, GOLD_G, GOLD_B = 1, 0.78, 0.32
+local CAST_W = 220            -- a world chest's opening bar
+local AUTO_COLLECT_DELAY = 1.2 -- seconds between the summary and auto-collect
+local DEMO_CAST = 3.2         -- seconds the demo pretends the opening cast takes
 
 local EMPTY_TEXT = {
     "Just dust", "Cobwebs", "A moth flew out", "Pocket lint", "An IOU from the last owner",
@@ -48,6 +51,16 @@ local EMPTY_TEXT_SCROLL = {
     "An overdue library notice",
 }
 local SCROLLS = { [277651] = true }
+-- the line over a world chest's opening bar, one per opening
+local CHEST_LINES = {
+    "Prying it open...", "Jiggling the lid...", "Something rattles inside...", "Creeeeeak...",
+    "Blowing off the dust...", "It's stuck. Of course it's stuck.", "Lifting the lid...",
+    "Checking for mimics...",
+}
+local EMPTY_TEXT_CHEST = {
+    "Cobwebs", "A spider (it's staying)", "A very old smell", "Moth wings", "Rusty nails", "Splinters",
+    "A note: \"Gone fishing\"", "Rat droppings. Lovely.",
+}
 local WET = { [20708] = true, [21113] = true, [21150] = true, [21228] = true, [6351] = true, [6352] = true,
     [6357] = true, [13874] = true, [5523] = true, [5524] = true, [7973] = true, [15874] = true }
 
@@ -297,7 +310,7 @@ local function PlayPop(ag)
 end
 
 local function ShowItemTooltip(owner, itemID, extra)
-    if not itemID then return end
+    if not itemID or itemID <= 0 then return end -- (world chests have negative ids: not items)
     GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
     GameTooltip:SetItemByID(itemID)
     if extra then
@@ -618,12 +631,35 @@ local function CreateCard(parent, level)
     c.flash:SetAllPoints()
     c.flash:SetAlpha(0)
 
+    -- group loot: a band across the card ("UP FOR ROLL", then who got it)
+    local stamp = CreateFrame("Frame", nil, top)
+    stamp:SetPoint("LEFT", inner, "LEFT", 2, 0)
+    stamp:SetPoint("RIGHT", inner, "RIGHT", -2, 0)
+    stamp:SetPoint("BOTTOM", inner, "BOTTOM", 0, 46)
+    stamp:SetHeight(20)
+    stamp.bg = stamp:CreateTexture(nil, "BACKGROUND")
+    stamp.bg:SetAllPoints()
+    stamp.bg:SetColorTexture(0, 0, 0, 0.78)
+    stamp.text = stamp:CreateFontString(nil, "OVERLAY")
+    stamp.text:SetFont(FONT, 10, "OUTLINE")
+    stamp.text:SetPoint("LEFT", 2, 0)
+    stamp.text:SetPoint("RIGHT", -2, 0)
+    stamp.text:SetWordWrap(false)
+    stamp:Hide()
+    c.stamp = stamp
+
     c.isCard = true
     c:SetScript("OnClick", function(self) UI:ClickCard(self) end)
     c:SetScript("OnEnter", function(self)
         local d = self.data
         if self.revealed and d and not d.empty then
-            ShowItemTooltip(self, d.itemID, { ("Crate tier: %s (%d/5)"):format(TierLabel(d.tier or 1), d.tier or 1) })
+            local extra = { ("Crate tier: %s (%d/5)"):format(TierLabel(d.tier or 1), d.tier or 1) }
+            if d.shared and not d.result then
+                extra[2] = d.shared == "roll" and "Group loot: roll for it in the game's roll window."
+                    or (d.mine and "You're the master looter: hand it out from the loot window after Collect.")
+                    or "Group loot: not yours to take. Watch the chat for who gets it."
+            end
+            ShowItemTooltip(self, d.itemID, extra)
         end
     end)
     c:SetScript("OnLeave", GameTooltip_Hide)
@@ -678,6 +714,8 @@ local function SetCardFace(c, d, containerID)
     c.sheen2:Hide()
     c.flash:SetAlpha(0)
     c.flash:Hide()
+    c.stamp:Hide()
+    c.face:SetAlpha(1)
     if d.empty then
         c.icon:SetTexture(DUST)
         if c.icon.SetDesaturated then c.icon:SetDesaturated(true) end
@@ -1039,6 +1077,10 @@ local function GetCell(i)
     c:SetSize(CELL_W, CELL_H)
     c.tile = CreateTile(c, 44, false)
     c.tile:SetPoint("TOP", 0, -2)
+    c.pct = c:CreateFontString(nil, "OVERLAY")
+    c.pct:SetFont(FONT, 10, "OUTLINE")
+    c.pct:SetPoint("TOP", c.tile, "BOTTOM", 0, -3)
+    c.pct:SetTextColor(0.78, 0.76, 0.82)
     c:EnableMouse(true)
     c:SetScript("OnEnter", function(self)
         local row = self.row
@@ -1133,7 +1175,7 @@ local function BuildOdds()
 end
 
 -- Demo box picker: every container, grouped, one click to switch
-local PICK_COLS, PICK_W, PICK_H, PICK_HEAD = 3, 214, 26, 22
+local PICK_COLS, PICK_W, PICK_H, PICK_HEAD = 4, 200, 26, 22 -- (4 across keeps it on screen with the world chests)
 
 local function BuildPicker()
     local blocker = CreateFrame("Frame", nil, f)
@@ -1293,7 +1335,10 @@ function UI:ShowForceBar(show)
         local r, g, bb = 1, 0.86, 0.5
         if t and t > 0 then r, g, bb = TierColor(t) elseif t == 0 then r, g, bb = 0.7, 0.7, 0.72 end
         local multi = ns.CardCount(self.itemID) >= 2
-        b.missing = (t and t > 0 and t < 6 and not has[t]) or (t == 0 and not c.failPct)
+        -- the 0 button: "Sheep" for Comprehension, "Empty" for a box that can come up empty
+        local canEmpty = not c.failPct and ns.EmptyChance(self.itemID) >= 0.01
+        if t == 0 then b.text:SetText(c.failPct and "Sheep" or "Empty") end
+        b.missing = (t and t > 0 and t < 6 and not has[t]) or (t == 0 and not c.failPct and not canEmpty)
         if t == 7 then
             -- Heirloom: lit when one of the player's hunted items is in this box (else it demos a stand-in)
             local any = false
@@ -1303,7 +1348,7 @@ function UI:ShowForceBar(show)
         if t == -1 then
             b:SetShown(multi)
         else
-            b:SetShown(t ~= 0 or c.failPct ~= nil)
+            b:SetShown(t ~= 0 or c.failPct ~= nil or canEmpty)
         end
         local sel
         if t == -1 then sel = self.forceCount == 2 else sel = (self.forceTier == t) end
@@ -1460,6 +1505,30 @@ local function Build()
     f.hint:SetTextColor(0.62, 0.6, 0.66)
     f.hint:SetPoint("TOP", f.info, "BOTTOM", 0, -6)
 
+    -- a world chest's opening cast, under the chest
+    local cb = CreateFrame("Frame", nil, stage, BACKDROP)
+    cb:SetSize(CAST_W + 4, 12)
+    cb:SetPoint("TOP", box, "BOTTOM", 0, -26)
+    cb:SetFrameLevel(37)
+    if cb.SetBackdrop then
+        cb:SetBackdrop({ bgFile = WHITE, edgeFile = WHITE, edgeSize = 1 })
+        cb:SetBackdropColor(0.04, 0.03, 0.06, 0.9)
+        cb:SetBackdropBorderColor(0.62, 0.48, 0.2, 0.9)
+    end
+    cb.fill = cb:CreateTexture(nil, "ARTWORK")
+    cb.fill:SetPoint("LEFT", 2, 0)
+    cb.fill:SetHeight(8)
+    cb.fill:SetWidth(1)
+    cb.spark = NewTex(cb, "OVERLAY", 1, "ADD")
+    cb.spark:SetTexture(STAR)
+    cb.spark:SetSize(26, 26)
+    cb.spark:SetPoint("CENTER", cb.fill, "RIGHT", 0, 0)
+    cb.text = cb:CreateFontString(nil, "OVERLAY")
+    cb.text:SetFont(FONT, 12, "OUTLINE")
+    cb.text:SetPoint("BOTTOM", cb, "TOP", 0, 5)
+    cb:Hide()
+    f.castBar = cb
+
     BuildReel(stage, 40)
     f.cards = {}
     f.cardLevel = 44
@@ -1555,6 +1624,9 @@ local function Build()
         if f.settings then f.settings:Hide() end
         if f.mine then f.mine:Hide() end
         if f.stats then f.stats:Hide() end
+        -- closed mid-cast: the player doesn't want the show for this chest
+        if UI.pending == "chest" and ns.ChestScreenClosed then ns.ChestScreenClosed() end
+        UI:RaiseLootFrames(false)
         UI:Reset()
         GameTooltip_Hide()
         if ns.live and not ns.live.collecting then
@@ -1585,17 +1657,23 @@ function UI:FillOdds(container)
         return a.pct < b.pct
     end)
 
+    -- world chests hold hundreds of random world drops: no item grid (the surprise is the point), just the
+    -- Rare+ odds line under the chest
     local perRow = 4
-    for i, row in ipairs(rows) do
+    local shown = container.world and 0 or #rows
+    for i = 1, shown do
+        local row = rows[i]
         local c = GetCell(i)
         c.row = row
         SetTile(c.tile, { itemID = row.id, quality = row.q, name = row.name, tier = row.tier }, self.itemID)
+        -- the chance right under the item (none for boxes whose numbers are only demo weights)
+        c.pct:SetText(row.estimated and "" or (row.pct < 0.01 and "<0.01%" or PctText(row.pct)))
         c:ClearAllPoints()
         c:SetPoint("TOPLEFT", ((i - 1) % perRow) * CELL_W, -floor((i - 1) / perRow) * CELL_H)
         c:Show()
     end
-    for i = #rows + 1, #p.cells do p.cells[i]:Hide() end
-    p.child:SetHeight(max(10, math.ceil(#rows / perRow) * CELL_H))
+    for i = shown + 1, #p.cells do p.cells[i]:Hide() end
+    p.child:SetHeight(max(10, math.ceil(shown / perRow) * CELL_H))
     p.scroll:SetVerticalScroll(0)
 
     -- chance of at least one item of a tier or better (drops treated as independent)
@@ -1626,13 +1704,14 @@ function UI:FillOdds(container)
     end
 
     p.note:SetText(container.estimated and "No odds known: ranked by how rare each one seems"
-        or "Hover an item for its drop chance")
+        or "Chance per opening. Hover an item for more")
 end
 
 -- The panel is always there before and after a pull; +/- folds it down to its header.
 -- expanded == nil counts as expanded (the default)
 function UI:ApplyOdds(expanded, fade)
     local p = f.oddsPanel
+    if self.container and self.container.world then p:Hide() return end
     expanded = expanded ~= false
     p.expanded = expanded
     p.scroll:SetShown(expanded)
@@ -1644,6 +1723,11 @@ function UI:ApplyOdds(expanded, fade)
         p:SetAlpha(0)
         FX:Tween(0.2, function(k) p:SetAlpha(k) end)
     end
+end
+
+-- the show is starting: the odds panel steps aside, unless the player wants it up the whole time
+function UI:HideOddsForShow()
+    if not (ns.db and ns.db.oddsAlways) then f.oddsPanel:Hide() end
 end
 
 function UI:ToggleOdds()
@@ -1696,6 +1780,9 @@ function UI:OnUpdate(el)
         self:Ambient(el, 12)
     elseif ph == "charge" then
         self:UpdateCharge(el)
+    elseif ph == "opening" then
+        self:UpdateOpening(el)
+        self:Ambient(el, 6)
     else
         self:Ambient(el, 7)
     end
@@ -1764,7 +1851,8 @@ function UI:PrepareDeck()
     local n = max(ns.CardCount(self.itemID), #self.items)
     local deck = {}
     for _, d in ipairs(self.items) do deck[#deck + 1] = d end
-    local jokes = (WET[self.itemID] and EMPTY_TEXT_WET) or (SCROLLS[self.itemID] and EMPTY_TEXT_SCROLL) or EMPTY_TEXT
+    local jokes = (WET[self.itemID] and EMPTY_TEXT_WET) or (SCROLLS[self.itemID] and EMPTY_TEXT_SCROLL)
+        or (self.container.world and EMPTY_TEXT_CHEST) or EMPTY_TEXT
     while #deck < n do
         deck[#deck + 1] = { empty = true, tier = 0, text = jokes[random(#jokes)] }
     end
@@ -1854,7 +1942,8 @@ end
 
 -- received: the result is already in the bags (Comprehension, or auto loot got there first): nothing to collect
 -- manual: opened from inside the case screen (My boxes / OPEN ANOTHER): wait for OPEN instead of auto-starting
-function UI:Open(itemID, slots, live, received, manual)
+-- fromCast: a world chest's opening cast already played the build-up: straight into the tell and the deal
+function UI:Open(itemID, slots, live, received, manual, fromCast)
     if not f then Build() end
     local wasShown = f:IsShown()
     f:Show() -- (OnHide of a previous case resets state, so show first and reset after)
@@ -1884,8 +1973,12 @@ function UI:Open(itemID, slots, live, received, manual)
             items[#items + 1] = s
         end
     end
-    self.items, self.copper, self.bestTier = items, copper, best
     self.style = ns.StyleFor(itemID, #items)
+    -- a reel box that came up empty still spins: onto a tile of dust
+    if self.style == "reel" and #items == 0 and not c.single then
+        items[1] = { nothing = true, tier = 0, quality = 0, icon = DUST, name = "Nothing" }
+    end
+    self.items, self.copper, self.bestTier = items, copper, best
 
     f.caseIcon:SetTexture(ns.ItemIcon(itemID))
     f.title:SetText(c.name)
@@ -1918,10 +2011,14 @@ function UI:Open(itemID, slots, live, received, manual)
     f.halo:SetAlpha(0.3)
     self:SetWash(GOLD_R, GOLD_G, GOLD_B, 0.05)
     self.ambR, self.ambG, self.ambB = GOLD_R, GOLD_G, GOLD_B
-    FX:Tween(0.4, function(k)
-        local s = 84 * max(0.05, EaseOutBack(k))
-        f.boxIcon:SetSize(s, s)
-    end)
+    if fromCast then
+        f.boxIcon:SetSize(84, 84)
+    else
+        FX:Tween(0.4, function(k)
+            local s = 84 * max(0.05, EaseOutBack(k))
+            f.boxIcon:SetSize(s, s)
+        end)
+    end
 
     local n = self.style == "reel" and 1 or self.numCards
     local what = self.style == "reel" and "1 item on the reel" or ("%d cards"):format(n)
@@ -1937,6 +2034,8 @@ function UI:Open(itemID, slots, live, received, manual)
     elseif ns.ONCE_ONLY[itemID] then
         f.hint:SetText(live and "There is one thing in here. There has only ever been one thing in here. Enjoy the show, just this once."
             or "Demo: there is only ever one thing in here.")
+    elseif c.world and not live then
+        f.hint:SetText("Demo: plays the opening too. Nothing is used up.")
     else
         f.hint:SetText(live and "Your box is ready." or "Demo roll: nothing is used up.")
     end
@@ -1963,6 +2062,21 @@ function UI:Open(itemID, slots, live, received, manual)
     end
     Sound("IG_BACKPACK_OPEN", 862)
 
+    -- group loot: the game's roll windows (and the master looter's loot window) must stay usable on top
+    local shared = 0
+    for _, d in ipairs(items) do if d.shared then shared = shared + 1 end end
+    self.sharedCount = shared
+    if shared > 0 then self:RaiseLootFrames(true) end
+
+    -- A world chest whose opening cast just played: no second build-up, straight into the tell
+    if fromCast then
+        f.mainBtn:Hide()
+        f.hint:SetAlpha(0)
+        self.castDone = true
+        self:StartOpen()
+        return
+    end
+
     -- A real opening: the player already opened the box (and may have heard the loot land), so the show
     -- starts by itself after the fade-in instead of waiting for OPEN. The demo keeps its button.
     -- (A comprehend switches straight to its own spinning reel, so this finds it no longer "ready".)
@@ -1981,12 +2095,18 @@ end
 ---------------------------------------------------------------------------
 
 function UI:StartOpen()
+    -- a world chest in the demo plays a pretend opening cast first, like the real thing
+    if self.container and self.container.world and not self.live and not self.castDone then
+        local now = GetTime()
+        self:BeginCast(now, now + DEMO_CAST * SpeedScale(), true)
+        return
+    end
     self.phase = "charge"
     f.mainBtn:Hide()
     f.pick:Hide()
     f.picker:Hide()
     f.forceBar:Hide()
-    f.oddsPanel:Hide()
+    self:HideOddsForShow()
     f.skip:SetLabel("Skip")
     f.skip:Show()
     f.status:SetText("")
@@ -2015,6 +2135,7 @@ function UI:StartOpen()
         end
     end
     local sp = SpeedScale()
+    if self.castDone then sp = sp * 0.6 end -- the opening cast already did the waiting
     local d0 = (best < 0 and 0.55 or (best <= 2 and 0.85 or 1.0)) * sp
     local lull = 0.45 * sp
     local times = { 0 }
@@ -2119,6 +2240,231 @@ function UI:Burst()
     FX:After(0.22, function()
         if self.style == "reel" then self:StartReel() else self:Deal() end
     end)
+end
+
+---------------------------------------------------------------------------
+-- World chests: the opening cast. Nothing is known yet, so the chest rattles harder as the bar fills while
+-- its glow hops between random tier colours (a tease, it means nothing). The loot window ends it: the real
+-- tell and the deal take over (Open with fromCast). The demo pretends the cast, then does the same.
+---------------------------------------------------------------------------
+
+function UI:BeginCast(startT, endT, demo)
+    self.phase = "opening"
+    f.mainBtn:Hide()
+    f.pick:Hide()
+    f.picker:Hide()
+    f.forceBar:Hide()
+    f.oddsPanel:Hide()
+    f.skip:Hide()
+    f.status:SetText("")
+    f.info:SetAlpha(0)
+    f.hint:SetAlpha(0)
+    f.box:Show()
+    f.box:SetAlpha(1)
+    local bx, by = FxPos(f.box)
+    self.cast = { start = startT or GetTime(), finish = endT, t = 0, hop = 0, acc = 0, tick = 0,
+        bx = bx, by = by, demo = demo, r = GOLD_R, g = GOLD_G, b = GOLD_B }
+    local cb = f.castBar
+    cb.fill:SetColorTexture(GOLD_R, GOLD_G, GOLD_B, 1)
+    cb.fill:SetWidth(1)
+    cb.text:SetText(CHEST_LINES[random(#CHEST_LINES)])
+    cb.text:SetTextColor(GOLD_R, GOLD_G, GOLD_B)
+    cb:Show()
+    cb:SetAlpha(0)
+    FX:Tween(0.2, function(k) cb:SetAlpha(k) end)
+    Sound("IG_MAINMENU_OPEN", 850)
+end
+
+function UI:UpdateOpening(el)
+    local o = self.cast
+    if not o then return end
+    o.t = o.t + el
+    local k
+    if o.finish and o.finish > o.start then
+        k = Clamp01((GetTime() - o.start) / (o.finish - o.start))
+    else
+        k = Clamp01(o.t / 5) -- (no cast times: assume the usual 5 sec)
+    end
+
+    -- the tease: a random tier colour, hopping faster as the bar fills
+    o.hop = o.hop - el
+    if o.hop <= 0 then
+        o.hop = 0.5 - 0.32 * k
+        local t = random(1, 5)
+        if t == o.lastT then t = (t % 5) + 1 end
+        o.lastT = t
+        o.r, o.g, o.b = TierColor(t)
+        EdgeGlowColor(f.boxGlow, o.r, o.g, o.b)
+        FX.HaloColor(f.halo, o.r, o.g, o.b)
+        self.ambR, self.ambG, self.ambB = o.r, o.g, o.b
+        self:SetWash(o.r, o.g, o.b, 0.04 + 0.05 * k)
+    end
+
+    -- the chest strains against its lid
+    local amp = 0.4 + 4.5 * k * k
+    f.box:SetPoint("CENTER", f.stage, "CENTER", (random() * 2 - 1) * amp, 10 + (random() * 2 - 1) * amp)
+    local bs = 84 * (1 + 0.14 * k)
+    f.boxIcon:SetSize(bs, bs)
+    EdgeGlowAlpha(f.boxGlow, 0.45 + 0.45 * k)
+    local h = f.halo
+    h.size = 280 + 200 * k
+    h.spin = 0.4 + 3.6 * k
+    h:SetAlpha(0.25 + 0.55 * k)
+
+    o.acc = o.acc + el * (10 + 55 * k)
+    while o.acc >= 1 do
+        o.acc = o.acc - 1
+        FX:Converge(o.bx, o.by, 1, 140 + random() * 160, o.r, o.g, o.b, 0.35 + random() * 0.3)
+    end
+    if o.t - o.tick > 0.34 - 0.24 * k then
+        o.tick = o.t
+        Sound("U_CHAT_SCROLL_BUTTON", 1115)
+    end
+
+    local cb = f.castBar
+    cb.fill:SetWidth(max(1, CAST_W * k))
+    cb.fill:SetColorTexture(o.r * 0.5 + GOLD_R * 0.5, o.g * 0.5 + GOLD_G * 0.5, o.b * 0.5 + GOLD_B * 0.5, 1)
+    cb.spark:SetVertexColor(o.r, o.g, o.b)
+    cb.spark:SetAlpha(k < 1 and (0.6 + 0.4 * sin(o.t * 20)) or 0)
+
+    -- the demo's pretend cast is done: on with the show. (A real one waits for the loot window, the chest
+    -- just keeps straining at full if the server takes a moment.)
+    if o.demo and k >= 1 then
+        self.cast = nil
+        self.castDone = true
+        self:HideCastBar()
+        self:StartOpen()
+    end
+end
+
+function UI:HideCastBar()
+    local cb = f and f.castBar
+    if not cb or not cb:IsShown() then return end
+    FX:Tween(0.2, function(k) cb:SetAlpha(1 - k) end, function() cb:Hide() end)
+end
+
+-- the opening cast started on a world chest we know: open the screen on the straining chest
+function UI:OpenChestPending(id, startT, endT)
+    if not ns.Containers[id] then return end
+    self:Open(id, {}, true, true)
+    self.pending = "chest"
+    self:BeginCast(startT, endT, false)
+end
+
+-- the cast was interrupted, nothing came out, or the chest isn't ours to show: let go
+function UI:CancelChest(msg)
+    if not f or self.pending ~= "chest" then return end
+    self.pending, self.cast = nil, nil
+    self.phase = "cancelled"
+    self:HideCastBar()
+    if not msg then f:Hide() return end
+    f.hint:SetText("|cffff8060" .. msg .. "|r")
+    f.hint:SetAlpha(1)
+    f.box:SetPoint("CENTER", f.stage, "CENTER", 0, 10)
+    FX:Tween(0.6, function(k)
+        f.box:SetAlpha(1 - 0.6 * k)
+        f.halo:SetAlpha(0.6 * (1 - k))
+    end)
+    Sound("IG_MAINMENU_CLOSE", 851)
+    local token = {}
+    self.cancelToken = token
+    FX:After(1.6, function()
+        if self.cancelToken == token and self.phase == "cancelled" then f:Hide() end
+    end)
+end
+
+---------------------------------------------------------------------------
+-- Group loot: items that go to a roll or the master looter are revealed like the rest, stamped, and left
+-- to the game. Its roll windows (and the loot window, for the master looter) are lifted above the screen.
+---------------------------------------------------------------------------
+
+-- (the loot window itself only once it's handed back: while hidden, its buttons would sit over the cards)
+local LOOT_FRAMES = { "GroupLootContainer", "GroupLootFrame1", "GroupLootFrame2", "GroupLootFrame3",
+    "GroupLootFrame4", "MasterLooterFrame" }
+local raised -- [frame] = { strata, level }
+
+function UI:RaiseLootFrames(on, list)
+    if on then
+        raised = raised or {}
+        for _, name in ipairs(list or LOOT_FRAMES) do
+            local fr = _G[name]
+            if fr and fr.SetFrameStrata and not raised[fr] and not (fr.IsProtected and fr:IsProtected() and InCombatLockdown()) then
+                raised[fr] = { fr:GetFrameStrata(), fr:GetFrameLevel() }
+                fr:SetFrameStrata("FULLSCREEN_DIALOG")
+                fr:SetFrameLevel(470)
+            end
+        end
+    elseif raised then
+        for fr, old in pairs(raised) do
+            if not (fr.IsProtected and fr:IsProtected() and InCombatLockdown()) then
+                fr:SetFrameStrata(old[1])
+                fr:SetFrameLevel(old[2])
+            end
+        end
+        raised = nil
+    end
+end
+
+local STAMP = {
+    roll = "UP FOR ROLL", master = "LOOTER'S CALL", locked = "NOT YOUR TURN",
+}
+
+-- the stamp across a shared card; d.result once someone got it
+local function SetStamp(c, d)
+    local st = c.stamp
+    if not d or d.empty or not d.shared then st:Hide() return end
+    local text, r, g, b = STAMP[d.shared] or "SHARED", 1, 0.82, 0.3
+    if d.shared == "master" and d.mine then text = "YOURS TO HAND OUT" end
+    if d.result == "you" then
+        text, r, g, b = "YOURS!", 0.35, 1, 0.45
+    elseif d.result == "other" then
+        text, r, g, b = (d.winner and d.winner ~= "") and ("TO " .. d.winner:upper()) or "TAKEN", 0.7, 0.7, 0.72
+    elseif d.result == "passed" then
+        text, r, g, b = "EVERYONE PASSED", 0.7, 0.7, 0.72
+    end
+    st.text:SetText(text)
+    st.text:SetTextColor(r, g, b)
+    st:Show()
+    c.face:SetAlpha(d.result == "other" and 0.45 or 1)
+end
+
+-- Core: a shared item found its owner
+function UI:SharedResult(slot)
+    if not f or not f:IsShown() then
+        if slot.result == "you" then
+            local r, g, b = TierColor(slot.tier or 1)
+            ns.Print(("You won |cff%s%s|r!"):format(Hex(r, g, b), slot.name or "it"))
+        end
+        return
+    end
+    for i = 1, self.numCards or 0 do
+        local c = f.cards[i]
+        if c.data == slot then
+            if c.revealed then
+                SetStamp(c, slot)
+                if slot.result == "you" then
+                    local r, g, b = TierColor(slot.tier or 1)
+                    local x, y = FxPos(c)
+                    FX:Burst(x, y, 24, r, g, b, 220)
+                    FlashCard(c, r, g, b, 0.8)
+                    if not Sound("UI_EPICLOOT_TOAST") then Sound("READY_CHECK", 8960) end
+                end
+            end
+            return
+        end
+    end
+end
+
+-- master looter: our share is in the bags, the rest waits in the loot window
+function UI:HandOut()
+    if not f or not f:IsShown() then return end
+    self.collectPending = nil
+    self.phase = "collected"
+    self:RaiseLootFrames(true, { "LootFrame", "MasterLooterFrame" })
+    f.status:SetText("Your share is in your bags. Hand out the rest from the loot window.")
+    f.mainBtn:SetLabel("CLOSE")
+    f.mainBtn:Enable()
+    f.mainBtn:Show()
 end
 
 ---------------------------------------------------------------------------
@@ -2250,6 +2596,7 @@ function UI:CardRevealed(c, fromShowcase)
     c.inner:SetWidth(c.cw)
     c:SetAlpha(1)
     local d = c.data
+    SetStamp(c, d)
     local t = d.empty and 0 or (d.tier or 1)
     local r, g, b = TierColor(t)
     local x, y = FxPos(c)
@@ -2772,7 +3119,7 @@ function UI:OpenPending(itemID)
     f.pick:Hide()
     f.forceBar:Hide()
     f.picker:Hide()
-    f.oddsPanel:Hide()
+    self:HideOddsForShow()
     f.info:SetAlpha(0)
     f.hint:SetAlpha(0)
     f.skip:Hide()
@@ -2946,6 +3293,11 @@ function UI:AfterReel(d, fromShowcase)
     if d.fail then
         SetBanner("BAAA!", 0.95, 0.9, 0.92)
         f.status:SetText("The scroll read you instead. 8 seconds of wool. (The scroll survives: try again!)")
+    elseif d.nothing then
+        SetBanner("Nothing...", r, g, b)
+        f.status:SetText(((self.copper or 0) > 0 and "No item this time, just coins.")
+            or (ns.ONCE_ONLY[self.itemID] and "Not even the meat. What did you expect?")
+            or "It was empty. That happens sometimes.")
     elseif ns.ONCE_ONLY[self.itemID] then
         -- straight to the punchline (no "You got ..." flashing first)
         SetBanner(BannerText(t), r, g, b)
@@ -3035,8 +3387,9 @@ function UI:Summary()
     if #self.items == 1 and self.items[1].fail then
         SetBanner("BAAA!", 0.95, 0.9, 0.92)
         LayoutStars(f.bannerStars, 0, 18, 2, f.banner, "BOTTOM", 0, -12)
-    elseif #self.items == 0 then
-        SetBanner((self.copper or 0) > 0 and "Just coins!" or "Only dust...", 0.65, 0.65, 0.68)
+    elseif #self.items == 0 or self.items[1].nothing then
+        SetBanner((self.copper or 0) > 0 and "Just coins!" or (#self.items > 0 and "Nothing..." or "Only dust..."),
+            0.65, 0.65, 0.68)
         LayoutStars(f.bannerStars, 0, 18, 2, f.banner, "BOTTOM", 0, -12)
     else
         local r, g, b = TierColor(best)
@@ -3079,6 +3432,11 @@ function UI:Summary()
     if self.style == "pull" then
         f.status:SetText(("%d of %d slots filled"):format(#self.items, self.numCards or 0))
     end
+    if (self.sharedCount or 0) > 0 then
+        local n = self.sharedCount
+        f.status:SetText(("%d of %d slots filled   |cffffd24d%d up to the group%s|r")
+            :format(#self.items, self.numCards or 0, n, (self.received or not self.live) and "." or ": Collect takes the rest."))
+    end
     self:CountCoins()
 
     if self.received then
@@ -3090,9 +3448,9 @@ function UI:Summary()
     f.mainBtn:Show()
     f.pick:SetShown(not self.live)
     self:ShowForceBar(not self.live)
-    self:ApplyOdds(ns.db and ns.db.uiShowOdds, true)
+    self:ApplyOdds(ns.db and ns.db.uiShowOdds) -- (fades back in if it was hidden for the show)
 
-    if ns.ONCE_ONLY[self.itemID] then
+    if ns.ONCE_ONLY[self.itemID] and not (self.items[1] and self.items[1].nothing) then -- (empty: keep its line)
         f.status:SetText(self.live and "What did you expect? (That was its one show: these open normally from now on.)"
             or "What did you expect?")
     end
@@ -3107,6 +3465,17 @@ function UI:Summary()
     if self.received and not self.container.compLevel and ns.db.batch then
         self.phase = "collected"
         self:OfferNextBox(self.itemID)
+    end
+    -- auto-collect: a beat to take in the banner and coins, then loot as if COLLECT was clicked
+    -- (clicking COLLECT sooner still works; the timer then finds the phase moved on and does nothing)
+    if self.live and not self.received and ns.db.autoCollect then
+        local lv = ns.live
+        C_Timer.After(AUTO_COLLECT_DELAY, function()
+            if f:IsShown() and self.phase == "done" and self.live and not self.collectPending
+                and not self.showcase and ns.live == lv then
+                self:OnMainButton()
+            end
+        end)
     end
 end
 
@@ -3123,6 +3492,7 @@ function UI:Reset()
     self.showCount = nil
     self.ambR, self.ambG, self.ambB = nil, nil, nil
     self.pending, self.landIndex = nil, nil
+    self.cast, self.castDone, self.sharedCount = nil, nil, nil
     self.dealTw = {}
     if FX then FX:Clear() end
     self:HideNext()
@@ -3146,6 +3516,7 @@ function UI:Reset()
     f.status:SetText("")
     f.reelText:SetText("")
     f.halo:SetAlpha(0)
+    f.castBar:Hide()
     self.numCards = 0
 end
 
@@ -3166,6 +3537,11 @@ function UI:Skip()
         return
     end
     local ph = self.phase
+    if ph == "opening" then
+        local o = self.cast
+        if o and o.demo then o.finish, o.start = GetTime(), GetTime() - 1 end -- (a real cast can't be hurried)
+        return
+    end
     if ph == "charge" then
         local ch = self.charge
         if ch and ch.idx < #ch.seq then
@@ -3355,6 +3731,7 @@ end
 
 -- batch mode, after Collect: the next box of the same kind, if there is one
 function UI:OfferNextBox(id)
+    if self.container and self.container.world then return end -- (a world chest isn't in the bags)
     C_Timer.After(0.35, function() -- give the bags a moment to drop the box just opened
         if not f:IsShown() or self.phase ~= "collected" or ns.live then return end
         local e = ns.BagBoxes()[id]
@@ -3762,6 +4139,10 @@ local function BuildSettings()
         Opt("Sound", function() return ns.db.sound end, function(v) ns.db.sound = v end),
         Opt("Batch mode (offer the next box)", function() return ns.db.batch end,
             function(v) ns.db.batch = v end),
+        Opt("Auto-collect (no COLLECT click)", function() return ns.db.autoCollect end,
+            function(v) ns.db.autoCollect = v end),
+        Opt("Keep the odds up during the show", function() return ns.db.oddsAlways end,
+            function(v) ns.db.oddsAlways = v end),
     }
     local spin = Label(opt, 12)
     spin:SetPoint("TOPLEFT", 0, oy - 6)
