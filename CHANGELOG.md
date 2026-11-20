@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.1
+
+### Changed
+- **Small Barnacled, Thick-shelled and Big-mouth Clams are card pulls now** (two cards), since they can give their meat and a pearl together. The crates and the Soft-shelled Clam keep the reel: they only ever give one thing.
+- **OPEN ANOTHER plays straight away**, no second OPEN press. Opening from My boxes still asks for OPEN first.
+
+### Fixed
+- Auto-collect could leave you clicking COLLECT anyway. It now waits for the screen to settle instead of giving up, and `/crates debug` says what it's doing.
+
 ## 1.1.0
 
 ### New

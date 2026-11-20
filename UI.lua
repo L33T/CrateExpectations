@@ -3468,15 +3468,37 @@ function UI:Summary()
     end
     -- auto-collect: a beat to take in the banner and coins, then loot as if COLLECT was clicked
     -- (clicking COLLECT sooner still works; the timer then finds the phase moved on and does nothing)
-    if self.live and not self.received and ns.db.autoCollect then
-        local lv = ns.live
-        C_Timer.After(AUTO_COLLECT_DELAY, function()
-            if f:IsShown() and self.phase == "done" and self.live and not self.collectPending
-                and not self.showcase and ns.live == lv then
-                self:OnMainButton()
-            end
-        end)
+    if self.live and not self.received then
+        if ns.db.autoCollect then
+            self:ScheduleAutoCollect(ns.live)
+        else
+            ns.Debug("auto-collect is off: waiting for COLLECT")
+        end
     end
+end
+
+-- Auto-collect: wait a beat, then collect as if COLLECT was clicked. Something still on screen (a spotlight,
+-- a flip finishing) only delays it: it checks again every quarter second for a while instead of giving up.
+function UI:ScheduleAutoCollect(lv)
+    local tries = 0
+    local function Try()
+        if not f:IsShown() or ns.live ~= lv or not self.live then
+            return ns.Debug("auto-collect: the case closed or changed, nothing to do")
+        end
+        if self.phase ~= "done" or self.collectPending then
+            return ns.Debug("auto-collect: already collected (phase " .. tostring(self.phase) .. ")")
+        end
+        if self.showcase or (lv and lv.collecting) then
+            tries = tries + 1
+            if tries > 40 then return ns.Debug("auto-collect: gave up waiting, COLLECT it is") end
+            C_Timer.After(0.25, Try)
+            return
+        end
+        ns.Debug("auto-collect: collecting")
+        self:OnMainButton()
+    end
+    ns.Debug(("auto-collect in %.1fs"):format(AUTO_COLLECT_DELAY))
+    C_Timer.After(AUTO_COLLECT_DELAY, Try)
 end
 
 ---------------------------------------------------------------------------
@@ -3674,9 +3696,9 @@ local function BuildNext()
     b.text:SetPoint("CENTER")
     b.text:SetTextColor(1, 0.86, 0.5)
     -- before the secure use happens: get ready to catch a box's loot window, and pause auto loot NOW, while
-    -- it still counts (opened from the case screen: the player presses OPEN when ready)
+    -- it still counts. From My boxes the player then presses OPEN when ready; OPEN ANOTHER just plays.
     b:SetScript("PreClick", function(self)
-        if self.boxID then ns.PrepareOpen(self.boxID, true) end
+        if self.boxID then ns.PrepareOpen(self.boxID, self.confirm) end
     end)
     b:Hide()
     nextBtn = b
@@ -3701,7 +3723,9 @@ local function PlaceNext(anchorFrame, dx)
 end
 
 -- attrs: { type = "item", item = "bag slot" } or { type = "macro", macrotext = "..." }
-function UI:ShowNext(label, attrs, boxID, anchorFrame, dx)
+-- confirm: the case then waits for OPEN (My boxes: picking a box is a choice, the press is the go-ahead).
+-- Without it (OPEN ANOTHER) the show starts by itself, like opening a box from the bags.
+function UI:ShowNext(label, attrs, boxID, anchorFrame, dx, confirm)
     if InLockdown() then return end
     -- never on its own: only while the case screen is actually up (it isn't the screen's child, so it would
     -- otherwise float over the game by itself)
@@ -3711,6 +3735,7 @@ function UI:ShowNext(label, attrs, boxID, anchorFrame, dx)
     nextBtn:SetAttribute("item", attrs.item)
     nextBtn:SetAttribute("macrotext", attrs.macrotext)
     nextBtn.boxID = boxID
+    nextBtn.confirm = confirm or nil
     nextBtn.text:SetText(label)
     nextBtn:SetWidth(max(220, nextBtn.text:GetStringWidth() + 40))
     PlaceNext(anchorFrame or f.mainBtn, dx or 0)
@@ -4357,7 +4382,7 @@ function UI:SelectMine(id)
         return
     end
     self:ShowNext(("OPEN %s (%d)"):format(ns.Containers[id].name:upper(), e.count),
-        { type = "item", item = e.bag .. " " .. e.slot }, id, m.anchor, 0)
+        { type = "item", item = e.bag .. " " .. e.slot }, id, m.anchor, 0, true)
 end
 
 function UI:ShowMine()

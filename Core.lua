@@ -85,16 +85,20 @@ local SLOTS = {
     [6353] = 4, [6354] = 4, [6355] = 3, [13918] = 3, [6356] = 2, [13875] = 2,
     -- junkboxes: Battered 1.10, Worn 1.13, Sturdy 1.34, Heavy 1.82
     [16882] = 2, [16883] = 2, [16884] = 3, [16885] = 3,
-    -- reel boxes: crates give exactly one thing; clams give their meat, plus a pearl about 1 time in 20
-    [6351] = 1, [6352] = 1, [6357] = 1, [13874] = 1, [5523] = 1, [5524] = 1, [7973] = 1, [15874] = 1,
+    -- reel boxes: crates give exactly one thing (their chances add up to 100%); the Soft-shelled Clam only meat
+    [6351] = 1, [6352] = 1, [6357] = 1, [13874] = 1, [15874] = 1,
+    -- clams: their meat, plus a pearl now and then (Small Barnacled 1.05, Thick-shelled 1.08, Big-mouth 1.07):
+    -- two cards, so the second one is the "pearl or dust?" flip
+    [5523] = 2, [5524] = 2, [7973] = 2,
     -- mage Study bundle (2-3 scrolls); Comprehension gives one
     [277651] = 3,
 }
 -- the fewest items a box ever gives (demo rolls top up to this)
 local MIN_ITEMS = { [277651] = 2 }
 local DEFAULT_SLOTS = 3 -- anything else
--- reel boxes can still give a second thing (a clam's pearl): the reel just spins again for it
-local REEL_EXTRA = { [5523] = 2, [5524] = 2, [7973] = 2 }
+-- reel boxes that can still give a second thing: the reel just spins again for it (none now: the clams that
+-- can give a pearl as well became card boxes)
+local REEL_EXTRA = {}
 
 -- The bottom three lockboxes are low-level boxes: nothing in them shows above Rare, whatever tier the
 -- same item has elsewhere (hunted items and elusive finds still beat this).
