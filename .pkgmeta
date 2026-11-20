@@ -1,5 +1,8 @@
 package-as: CrateExpectationsCases
 
+manual-changelog: CHANGELOG.md
+
 ignore:
   - README.md
+  - CHANGELOG.md
   - .github

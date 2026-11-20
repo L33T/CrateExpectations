@@ -104,6 +104,10 @@ Restart the game fully, then type `/crates`.
 - **Full bags:** you get a warning, and the loot window comes back so nothing is lost.
 - **Combat:** the show closes itself the moment you enter combat.
 
+## What's new
+
+See the [changelog](CHANGELOG.md).
+
 ## Reporting
 
 Found an Elusive item, or a bug? Please [open an issue](https://github.com/L33T/CrateExpectations/issues). For bugs, turn on `/crates debug` before reproducing the problem and include what it prints.
