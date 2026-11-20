@@ -1838,6 +1838,14 @@ end
 
 local function SubText(self)
     local c = self.container
+    if c.compLevel then
+        -- every untranslated scroll is its own item (dozens of names per skill level), so the count is all
+        -- comprehends together, not just this one scroll's
+        local n = 0
+        for id in pairs(ns.CompScrolls) do n = n + (ns.db.stats.opened[id] or 0) end
+        return ("No odds known for these   |   You've comprehended %d   |   %d since your last Rare+"):format(
+            n, ns.db.stats.sinceRare or 0)
+    end
     if c.estimated then
         return ("No odds known for this one   |   You've done %d   |   %d since your last Rare+"):format(
             ns.db.stats.opened[self.itemID] or 0, ns.db.stats.sinceRare or 0)
@@ -3438,6 +3446,9 @@ function UI:Summary()
             :format(#self.items, self.numCards or 0, n, (self.received or not self.live) and "." or ": Collect takes the rest."))
     end
     self:CountCoins()
+    -- (the line under the title was drawn before this opening was counted: a comprehend or an auto-looted box
+    -- is in the stats by now; a box still to collect gets counted, and redrawn, on Collect)
+    f.sub:SetText(SubText(self))
 
     if self.received then
         f.mainBtn:SetLabel("CLOSE")

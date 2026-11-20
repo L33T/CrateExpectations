@@ -2,7 +2,7 @@
 ## Title: |cffffb84dCrate Expectations|r
 ## Notes: Turn every lockbox, clam, trunk and mage scroll into a case opening. Rarity tiers, luck stats, a hunt list, and far too many sparkles.|n|nSlash: /crates
 ## Author: Daniel
-## Version: 1.1.1
+## Version: 1.1.2
 ## SavedVariables: CrateExpectationsCasesDB
 ## IconTexture: Interface\AddOns\CrateExpectationsCases\Media\Icon
 ## Category: Loot

@@ -80,7 +80,7 @@ Restart the game fully, then type `/crates`.
 **Not showing up in the AddOns list?** WoW only loads the addon when the folder is named exactly `CrateExpectationsCases` and sits directly in `AddOns`:
 
 - Don't use GitHub's green **Code → Download ZIP** button: its folder is named `CrateExpectations-main`. If you did, rename the folder to `CrateExpectationsCases`.
-- Windows' **Extract All** can add an extra folder layer (`AddOns/CrateExpectationsCases-1.1.1/CrateExpectationsCases/…`). Move the inner folder directly into `AddOns`.
+- Windows' **Extract All** can add an extra folder layer (`AddOns/CrateExpectationsCases-1.1.2/CrateExpectationsCases/…`). Move the inner folder directly into `AddOns`.
 - Make sure it's the `_forever_` folder, not `_retail_` or `_classic_era_`.
 
 ## Commands

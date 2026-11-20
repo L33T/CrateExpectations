@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.2
+
+### Fixed
+- The Comprehension screen said "You've done 0" however many scrolls you'd read: it only counted the one scroll in hand (every scroll name is its own item). It now counts all your comprehends, and updates right after each one.
+
 ## 1.1.1
 
 ### Changed
