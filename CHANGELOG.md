@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.3
+
+### Fixed
+- A world chest could deal empty cards for items your game hadn't loaded yet (random world drops you'd never seen), showing only some of what you got. Those items count as items now, and the deal waits a moment for them to load.
+- With a loot addon (or auto-loot) grabbing a world chest's loot first, the show could replay with only the last item and count the chest twice. It now shows everything you got, once.
+
 ## 1.1.2
 
 ### Fixed

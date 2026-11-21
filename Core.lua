@@ -683,8 +683,10 @@ end
 
 -- slot.shared: "roll" (Need/Greed), "master" (the master looter hands it out) or "locked" (not ours, e.g. not
 -- our turn): the show reveals it, but never takes it. The game's own roll windows / loot window handle it.
+-- returns the slots, and how many items the client hasn't loaded yet (no link: random world loot you've never
+-- seen often comes in a moment after the loot window)
 local function ReadLootSlots()
-    local slots = {}
+    local slots, missing = {}, 0
     local n = GetNumLootItems() or 0
     local moneyType = Enum and Enum.LootSlotType and Enum.LootSlotType.Money
     local rule, threshold, iAmML = GroupLootRule()
@@ -695,6 +697,10 @@ local function ReadLootSlots()
             local link = GetLootSlotLink(i)
             local id = link and tonumber(link:match("item:(%d+)"))
             if type(name) == "string" then name = name:gsub("\n", " ") end
+            -- coins by the slot type; "no link" only when the client can't say (a not-yet-loaded item has no
+            -- link either, and must not turn into 0 copper)
+            local money
+            if moneyType and slotType ~= nil then money = slotType == moneyType else money = not link and not id end
             local s = {
                 slot = i,
                 itemID = id,
@@ -702,8 +708,10 @@ local function ReadLootSlots()
                 name = name,
                 count = qty or 1,
                 quality = quality or 1,
-                money = (moneyType and slotType == moneyType) or (not link and not id),
+                money = money,
             }
+            local itemType = Enum and Enum.LootSlotType and Enum.LootSlotType.Item
+            if not money and not id and (slotType == nil or slotType == itemType) then missing = missing + 1 end
             if s.money then
                 s.copper = ns.ParseMoney(name)
             elseif rule and (quality or 1) >= threshold then
@@ -715,7 +723,7 @@ local function ReadLootSlots()
             slots[#slots + 1] = s
         end
     end
-    return slots
+    return slots, missing
 end
 
 -- shared items still waiting on a roll / the master looter: { [itemID] = slot }, to catch who got them
@@ -785,12 +793,16 @@ local function ChestAllowed(id)
     return ns.db and ns.db.enabled and not ns.live and not InCombat() and ns.IsBoxEnabled(id)
 end
 
+local DealLoot
+local lootWaiting -- the loot window is up but some of its items are still loading: dealing is on hold
+
 -- the opening cast finished (or the game opened the chest straight away): the real loot replaces the deck
 local function OnLootShown(autoLoot)
-    if ns.live then
+    if ns.live or lootWaiting then
         ns.HideLootFrame() -- LOOT_OPENED after LOOT_READY: keep it hidden
         return
     end
+    if ns.skipLoot then return end -- this loot window was already handled (or left alone) until it closes
     local id, manual, fromCast
     local chestID = LootChest()
     if chestID then
@@ -814,7 +826,40 @@ local function OnLootShown(autoLoot)
         if not LootIsFromItem() then return end
         id, manual = pending.itemID, pending.fromUI
     end
-    local slots = ReadLootSlots()
+    local slots, missing = ReadLootSlots()
+    if missing > 0 and autoLoot ~= true then
+        -- some items aren't loaded yet (no link, so no item ID for the tier): hold the window hidden and look
+        -- again a few times, up to a second, before dealing. (Not when auto loot is taking it: it's now or never.)
+        ns.Debug(("%d item(s) still loading, waiting"):format(missing))
+        lootWaiting = true
+        ns.HideLootFrame()
+        local tries = 0
+        local function Again()
+            if not lootWaiting then return end -- (the loot window closed meanwhile)
+            local s2, m2 = ReadLootSlots()
+            tries = tries + 1
+            if m2 > 0 and tries < 10 then
+                C_Timer.After(0.1, Again)
+                return
+            end
+            lootWaiting = nil
+            if ns.live then return end
+            if InCombat() then -- (a fight broke out meanwhile: the plain loot window it is)
+                ns.RevealLootFrame()
+                if ns.UI.pending == "chest" then ns.UI:CancelChest() end
+                return
+            end
+            ns.Debug(("loot read after %d tr%s, %d still loading"):format(tries, tries == 1 and "y" or "ies", m2))
+            DealLoot(id, manual, fromCast, chestID, autoLoot, s2)
+        end
+        C_Timer.After(0.1, Again)
+        return
+    end
+    DealLoot(id, manual, fromCast, chestID, autoLoot, slots)
+end
+
+-- the loot is read: play it (or hand it back, when there's nothing in it)
+function DealLoot(id, manual, fromCast, chestID, autoLoot, slots)
     if #slots == 0 then
         if fromCast then ns.UI:CancelChest("Empty! Someone got here first.") end
         if not chestID then
@@ -851,6 +896,9 @@ local function OnLootShown(autoLoot)
     -- is still readable: play the case anyway, as "already in your bags" (like Comprehension), no Collect.
     if autoLoot == true then
         ns.Debug("auto loot is taking this one: playing it as already looted")
+        -- this window is done: LOOT_OPENED follows LOOT_READY, and by then the loot addon has taken most of
+        -- it, so reading it again would replay the case with only what's left (and count it twice)
+        ns.skipLoot = true
         ns.RecordOpen(id, slots)
         C_Timer.After(0, function()
             if not ns.live and not InCombat() then ns.UI:Open(id, slots, true, true, manual, fromCast) end
@@ -897,7 +945,13 @@ local function OnChestSent(target, castGUID, spellID)
         and C_Spell.GetSpellName(spellID)
     if type(sn) == "string" and sn:lower():find("pick lock", 1, true) then return end
     local id = ns.ChestNames and ns.ChestNames[target]
-    if not id or not ChestAllowed(id) then return end
+    if not id then
+        if type(sn) == "string" and sn:lower():find("open", 1, true) then
+            ns.Debug(("opening cast on %q (%s): not a chest we know by name"):format(target, tostring(spellID)))
+        end
+        return
+    end
+    if not ChestAllowed(id) then return end
     if IsModifiedClick and IsModifiedClick("AUTOLOOTTOGGLE") then return end -- "just loot it"
     local at = GetTime()
     chestCast = { id = id, guid = castGUID, at = at }
@@ -1089,6 +1143,11 @@ end
 local function OnLootClosed()
     pending = nil
     ns.skipLoot = nil
+    if lootWaiting then
+        -- closed while its items were still loading: a chest still on its opening screen has nothing to show
+        lootWaiting = nil
+        if ns.UI.pending == "chest" then ns.UI:CancelChest() end
+    end
     local live = ns.live
     if live then
         ns.live = nil
